@@ -14,6 +14,7 @@
 | Database | Prisma ORM → SQLite | Prisma 7.x |
 | Validation | Zod | 4.x |
 | Auth | Auth.js (NextAuth v5) + PrismaAdapter | Latest |
+| Security | ESLint Security Plugin + Security Headers (proxy.ts) | Latest |
 | Testing | Vitest (only when explicitly requested) | 4.x |
 | Runtime | React 19 (Server Components by default) | 19.x |
 
@@ -29,6 +30,11 @@ src/
 │   ├── layout.tsx          # Root layout
 │   ├── page.tsx            # Landing page
 │   └── globals.css         # Tailwind + shadcn theme
+│
+├── api/                    # Frontend API Layer (external API calls)
+│   ├── client.ts           # Base fetch wrapper (apiGet, apiPost, etc.)
+│   └── endpoints/          # Feature-specific API modules
+│       └── [feature].ts    # e.g., endpoints/user.ts, endpoints/product.ts
 │
 ├── components/             # Presentational UI Components
 │   ├── ui/                 # shadcn/ui (auto-generated, DO NOT manually edit)
@@ -47,6 +53,7 @@ src/
 ├── lib/                    # Library Configs & Core Utilities
 │   ├── prisma.ts           # Prisma Client (SINGLETON + libSQL adapter — already set up)
 │   ├── auth.ts             # Auth.js config
+│   ├── security.ts         # Security helpers (sanitize, rate-limit, masking)
 │   └── utils.ts            # cn() utility (shadcn — already set up)
 │
 ├── schemas/                # Zod Validation Schemas
@@ -58,8 +65,10 @@ src/
 ├── helpers/                # Pure Utility Functions (no side effects)
 │   └── [name].ts           # e.g., format-date.ts, calculate-price.ts
 │
-└── constants/              # App-wide Constants & Configs
-    └── index.ts            # NAV_ITEMS, PAGINATION, APP_NAME, etc.
+├── constants/              # App-wide Constants & Configs
+│   └── index.ts            # NAV_ITEMS, PAGINATION, APP_NAME, etc.
+│
+└── proxy.ts                # Security Headers Proxy (CSP, HSTS, X-Frame-Options)
 ```
 
 ### Naming Conventions
@@ -103,13 +112,21 @@ export async function createSomething(formData: FormData): Promise<ActionRespons
 
 ### Critical Backend Rules
 1. **NO raw SQL.** Always use Prisma Client.
-2. **NO API Routes.** Use Server Actions for all mutations.
+2. **NO API Routes for DB mutations.** Use Server Actions for all database mutations.
 3. **Every Server Action** must return `ActionResponse<T>` type.
 4. **Every Server Action** must have `try-catch` with user-friendly Thai error messages.
 5. **Always validate** input with Zod before database operations.
-6. **Prisma Client** — Import from `@/lib/prisma` (singleton with libSQL adapter, already set up).
-7. **Prisma Client class** — Import `PrismaClient` type from `@/generated/prisma/client` (NOT `@prisma/client`).
-8. After modifying `schema.prisma`, always run `npx prisma db push` then `npx prisma generate`.
+6. **Always sanitize** user-generated content with `sanitizeHtml()` from `@/lib/security` before storing/rendering.
+7. **Prisma Client** — Import from `@/lib/prisma` (singleton with libSQL adapter, already set up).
+8. **Prisma Client class** — Import `PrismaClient` type from `@/generated/prisma/client` (NOT `@prisma/client`).
+9. After modifying `schema.prisma`, always run `npx prisma db push` then `npx prisma generate`.
+
+### Frontend API Layer (`src/api/`)
+- **Use for external API calls only** (3rd party services, external REST APIs).
+- **Do NOT use for database operations** — use Server Actions instead.
+- Import from `@/api/client` for base functions (`apiGet`, `apiPost`, etc.).
+- Create feature-specific modules in `@/api/endpoints/[feature].ts`.
+- All API calls are type-safe with generics: `apiGet<UserResponse>("/users")`.
 
 ---
 
@@ -146,12 +163,53 @@ export async function createSomething(formData: FormData): Promise<ActionRespons
 3. Add `AUTH_SECRET` to `.env`
 4. Prisma schema already has all required Auth.js models
 
-### Security Checklist
+### 🛡️ Security Architecture (3 Layers)
+
+#### Layer 1: Static Analysis — ESLint Security Plugin
+อยู่ใน `eslint.config.mjs` — ทำงานอัตโนมัติตอน `npm run lint`
+- **detect-eval-with-expression** — ป้องกัน `eval()` injection
+- **detect-unsafe-regex** — ป้องกัน ReDoS attacks
+- **detect-child-process** — ป้องกัน command injection
+- **detect-possible-timing-attacks** — ป้องกัน timing-based attacks
+- **detect-no-csrf-before-method-override** — ป้องกัน CSRF bypass
+- **@typescript-eslint/no-explicit-any** — บังคับ strict typing
+
+#### Layer 2: Runtime Protection — Security Proxy (`src/proxy.ts`)
+Next.js 16 ใช้ `proxy.ts` แทน `middleware.ts` — ใส่ security headers อัตโนมัติ:
+- **Content-Security-Policy (CSP)** — ป้องกัน XSS ด้วย nonce-based policy
+- **X-Content-Type-Options: nosniff** — ป้องกัน MIME type sniffing
+- **X-Frame-Options: DENY** — ป้องกัน clickjacking
+- **Strict-Transport-Security** — บังคับ HTTPS (2 ปี + preload)
+- **Referrer-Policy** — ควบคุม referrer information
+- **Permissions-Policy** — จำกัด browser features ที่ไม่จำเป็น
+
+#### Layer 3: Application Level — Security Helpers (`src/lib/security.ts`)
+Import จาก `@/lib/security`:
+- `sanitizeHtml(input)` — ลบ HTML tags ป้องกัน XSS
+- `sanitizeString(input)` — ลบ special characters
+- `isRateLimited(id, max, windowMs)` — In-memory rate limiting
+- `isValidEmail(email)` — Email format validation
+- `isStrongPassword(password)` — Password strength check
+- `maskEmail(email)` / `maskString(str)` — Mask sensitive data สำหรับ logging
+
+### Security Review Commands
+```bash
+# Run security lint
+npm run lint
+
+# Check for dependency vulnerabilities
+npm audit
+```
+
+### Security Checklist (MANDATORY)
 - [ ] Validate ALL user inputs with Zod (both client and server)
 - [ ] Use `"use server"` directive on all Server Action files
 - [ ] Never expose database IDs or internal errors to the client
-- [ ] Sanitize user-generated content before rendering
+- [ ] Sanitize user-generated content with `sanitizeHtml()` before rendering
 - [ ] Use CSRF protection via Server Actions (built-in with Next.js)
+- [ ] Run `npm run lint` to check for security anti-patterns
+- [ ] Never log sensitive data — use `maskEmail()` / `maskString()` from `@/lib/security`
+- [ ] Use `isRateLimited()` for sensitive endpoints (login, registration, etc.)
 
 ---
 
@@ -198,8 +256,10 @@ When requested:
 4. ✅ **Server Actions** return `ActionResponse<T>` with try-catch
 5. ✅ **Zod validation** on all user inputs
 6. ✅ **No raw SQL** — Prisma Client only
-7. ✅ **Build succeeds** — Run `npm run build` to verify
-8. ✅ **UI renders correctly** — Check via preview/browser if applicable
+7. ✅ **Security lint passes** — Run `npm run lint` (includes security rules)
+8. ✅ **User input sanitized** — Use `sanitizeHtml()` for user-generated content
+9. ✅ **Build succeeds** — Run `npm run build` to verify
+10. ✅ **UI renders correctly** — Check via preview/browser if applicable
 
 ### Error Recovery
 - If a build fails, read the error message carefully and fix immediately.
